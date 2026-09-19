@@ -19,7 +19,12 @@ clone_core() {
         return
     fi
     echo "Cloning $name into $dest..."
-    git clone "$url" "$dest"
+    # --depth 1: this repo only ever needs the core's current RTL, not its
+    # own commit history (that belongs in the core's own repo) -- also
+    # avoids re-transferring MH030's full history of docs/*.pdf blobs
+    # across many historical commits, which made a full clone unreliable
+    # over a throttled connection during initial testing.
+    git clone --depth 1 "$url" "$dest"
 }
 
 # MH030: cycle-accurate MC68030 CPU core (this project's own m68030_top)

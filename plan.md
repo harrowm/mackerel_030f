@@ -215,8 +215,63 @@ of those projects' own memory/plan files.
   (Crowd Supply's current batch ships v3.1.7/v3.1.8, not yet published
   upstream; using v3.1.6 as a stand-in has been fine for toolchain
   validation)
-- [~] Step 3: `mackerel_030f.v` top-level glue module — in progress,
-  see `pld/mackerel-030f/`
+- [x] **Step 3: `mackerel_030f.v` top-level glue module — first cut
+  (ROM + GPIO/LED only) written, synthesized, placed, routed, and
+  packed into a real bitstream against the actual ULX3S `.lpf`. See
+  "Step 3 first cut result" below. Not yet loaded onto real hardware —
+  no board in hand yet, and the `.lpf` is still the v3.1.6 stand-in.**
+
+### Step 3 first cut result (2026-09-19)
+
+Wrote `pld/mackerel-030f/mackerel_030f.v`: PLL (real `ecppll`-generated
+25→100MHz wrapper, not hand-derived), power-on reset, `m68030_top`
+wired to its complete real pin list, on-chip ROM (4KB, `$readmemh`,
+registered/synchronous read — deliberately the real BRAM-inferable
+idiom), one GPIO/LED register, and a bus watchdog asserting `BERR` on
+unmapped accesses. Plus `boot.s`/`rom.hex`: a real, hand-assembled
+smoke-test program (LED counter with a software delay loop) — SSP/PC
+vectors, `MOVEA.L`/`MOVE.L`/`ADDQ.L`/`SUBQ.L`/`Bcc.S` encodings all
+verified by hand against the standard 68000 bit layouts.
+
+Two details confirmed directly against MH030's own RTL rather than
+assumed, worth recording since they'll matter for every future
+peripheral: the 32-bit-port DSACK encoding (`dsack0_n`/`dsack1_n` both
+asserted together decodes as port=2'b11 in `biu_sizing_fsm.sv`'s
+`next_siz`/`needs_more` functions -> 32-bit, whole request in one
+beat), and `ext_rw` polarity (1=read, 0=write, confirmed via its
+reset-default values in `biu_cycle_gen.sv`).
+
+**Full real toolchain chain exercised end to end, 0 errors at every
+stage:**
+1. Yosys synthesis (`synth_lattice -family ecp5` + the `abc -lut 4`
+   recipe from Step 1) — 0 problems reported by `check`.
+2. `nextpnr-ecp5 --85k --package CABGA381 --lpf ulx3s_v20.lpf
+   --ignore-loops` — **every one of the module's own ports
+   (`led[7:0]`, `ftdi_txd`/`ftdi_rxd`, `clk_25mhz`, `btn[6:0]`) matched
+   a real physical pad in the `.lpf` and placed correctly**, the PLL
+   placed onto a real `EHXPLL` hardware block, 235,213 routing arcs
+   routed. **"Program finished normally." 0 errors.**
+3. `ecppack` — produced a real 1.28 MB `.bit` bitstream file,
+   `impl/mackerel_030f.bit`.
+
+Resource utilization essentially unchanged from the bare-core numbers
+(64,161/83,640 LUT4, 76%; 12,694 DFFs) — the glue logic itself
+(PLL/reset/ROM/GPIO/watchdog) is a rounding error against the CPU core.
+
+**This is a genuine, complete milestone**: the actual Mackerel-030F
+top-level module — not just the bare `m68030_top` core — has been
+synthesized, placed, routed against real board pin constraints, and
+packed into a loadable bitstream, with zero errors at any stage. As
+before, the reported Fmax (1.69 MHz) is not meaningful — same
+non-timing-driven `abc -lut 4` synthesis shortcut as Step 1, not a real
+speed ceiling.
+
+**Not done, real remaining gaps before this can run on real hardware:**
+the `.lpf` is the v3.1.6 stand-in, not the user's actual board revision
+(Crowd Supply's current batch ships v3.1.7/v3.1.8); there is no
+physical board in hand yet to load the bitstream onto; and getting a
+trustworthy Fmax number is still separate future work (proper
+timing-driven synthesis with a real clock constraint).
 
 ### Step 1 progress (2026-09-18)
 

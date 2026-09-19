@@ -4,10 +4,12 @@ cores/mh882/
 
 # Synthesis / P&R build outputs
 pld/mackerel-030f/impl/
+pld/mackerel-030f/flat.v
 pld/mackerel-030f/*.json
 pld/mackerel-030f/*.config
 pld/mackerel-030f/*.bit
 pld/mackerel-030f/*.svf
+pld/mackerel-030f/*_log.txt
 *.vvp
 *.vcd
 a.out
