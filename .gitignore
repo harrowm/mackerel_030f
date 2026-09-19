@@ -1,0 +1,16 @@
+# External cores, fetched by cores/get_cores.sh -- never vendored
+cores/mh030/
+cores/mh882/
+
+# Synthesis / P&R build outputs
+pld/mackerel-030f/impl/
+pld/mackerel-030f/*.json
+pld/mackerel-030f/*.config
+pld/mackerel-030f/*.bit
+pld/mackerel-030f/*.svf
+*.vvp
+*.vcd
+a.out
+
+# macOS
+.DS_Store
