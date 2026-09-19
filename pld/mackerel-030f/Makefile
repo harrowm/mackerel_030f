@@ -11,6 +11,7 @@ SV2V     = sv2v
 
 MH030    = ../../cores/mh030/rtl
 UART     = ../../cores/uart16550/rtl/verilog
+SPI      = ../../cores/tiny_spi/rtl/verilog
 TOP      = mackerel_030f
 LPF      = ulx3s_v20.lpf
 
@@ -50,20 +51,21 @@ MH030_SRCS = \
     $(MH030)/m68030_mmu.sv \
     $(MH030)/m68030_top.sv
 
-GLUE_SRCS = mackerel_030f.v clk_pll.v uart.v sdram_adapter.v vendor/sdram_16bit.v
+GLUE_SRCS = mackerel_030f.v clk_pll.v uart.v spi.v sdram_adapter.v vendor/sdram_16bit.v
 
-# OpenCores uart16550 -- the same core Mackerel-F itself uses. Plain
-# Verilog-2001, no sv2v flattening needed (unlike MH030's SV).
+# OpenCores uart16550/tiny_spi -- the same cores Mackerel-F itself uses.
+# Plain Verilog-2001, no sv2v flattening needed (unlike MH030's SV).
 UART_SRCS = $(wildcard $(UART)/*.v)
+SPI_SRCS  = $(SPI)/tiny_spi.v
 
 BIT = impl/$(TOP).bit
 
 flat.v: $(MH030_SRCS)
 	$(SV2V) -I $(MH030) $(MH030_SRCS) > flat.v
 
-$(BIT): flat.v $(GLUE_SRCS) $(UART_SRCS) $(LPF) rom.hex
+$(BIT): flat.v $(GLUE_SRCS) $(UART_SRCS) $(SPI_SRCS) $(LPF) rom.hex
 	mkdir -p impl
-	$(YOSYS) -p "read_verilog flat.v; read_verilog $(GLUE_SRCS) $(UART_SRCS); \
+	$(YOSYS) -p "read_verilog flat.v; read_verilog $(GLUE_SRCS) $(UART_SRCS) $(SPI_SRCS); \
 	    synth_lattice -family ecp5 -top $(TOP) -run begin:map_luts; \
 	    abc -lut 4; \
 	    techmap -map +/lattice/cells_map_trellis.v; \

@@ -2,6 +2,7 @@
 cores/mh030/
 cores/mh882/
 cores/uart16550/
+cores/tiny_spi/
 
 # Synthesis / P&R build outputs
 pld/mackerel-030f/impl/

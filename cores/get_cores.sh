@@ -57,4 +57,8 @@ clone_core_full() {
 }
 clone_core_full uart16550 https://github.com/freecores/uart16550.git
 
+# OpenCores tiny_spi SPI master -- the same core Mackerel-F itself uses,
+# for the onboard microSD slot (SD card in SPI mode).
+clone_core_full tiny_spi https://github.com/freecores/tiny_spi.git
+
 echo "Done."

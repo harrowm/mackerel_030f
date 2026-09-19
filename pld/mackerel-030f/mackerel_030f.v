@@ -44,7 +44,18 @@ module mackerel_030f (
     output wire [12:0] sdram_a,
     output wire [1:0]  sdram_ba,
     output wire [1:0]  sdram_dqm,
-    inout  wire [15:0] sdram_d
+    inout  wire [15:0] sdram_d,
+
+    // Onboard microSD slot, SPI mode -- pin names/roles confirmed
+    // directly against ulx3s_v20.lpf's own comments (sd_cmd_di=MOSI,
+    // sd_d0_do=MISO, sd_d3_csn=CS#). sd_d[1]/sd_d[2] deliberately not
+    // declared -- the .lpf's own note says leaving them unused avoids a
+    // conflict with the onboard ESP32's wifi_gpio4/12, which this
+    // project doesn't use.
+    output wire sd_clk,
+    output wire sd_cmd,
+    input  wire sd_d0,
+    output wire sd_d3
 );
 
     // ─── Clock: 25 MHz board osc -> 100 MHz clk_4x (25 MHz external bus) ───
@@ -142,7 +153,9 @@ module mackerel_030f (
     // ─── Memory map ──────────────────────────────────────────────────────
     //   ROM    0x00000000-0x00000FFF   4 KB, on-chip, $readmemh
     //   GPIO   0xFFFFFF00               1 register (write: D[7:0] -> led)
+    //   SDCS   0xFFFFFF08               1 register (write: D[0] -> sd_d3/CS#)
     //   UART   0xFFFFFF10-0xFFFFFF17   8 registers (uart16550 register map)
+    //   SPI    0xFFFFFF20-0xFFFFFF24   5 registers (tiny_spi register map)
     //   SDRAM  0x02000000-0x03FFFFFF  32 MB, off-chip
     //   (else) unmapped -> BERR via watchdog
     //
@@ -164,28 +177,32 @@ module mackerel_030f (
 
     wire in_rom   = cyc_active && (ext_a[31:12] == 20'h00000);
     wire in_gpio  = cyc_active && (ext_a == 32'hFFFFFF00);
+    wire in_sdcs  = cyc_active && (ext_a == 32'hFFFFFF08);
     wire in_uart  = cyc_active && (ext_a[31:8] == 24'hFFFFFF) && (ext_a[7:3] == 5'b00010);
+    wire in_spi   = cyc_active && (ext_a[31:8] == 24'hFFFFFF) && (ext_a[7:3] == 5'b00100);
     wire in_sdram = cyc_active && (ext_a[31:25] == 7'b0000001);
-    wire in_any   = in_rom || in_gpio || in_uart || in_sdram;
+    wire in_any   = in_rom || in_gpio || in_sdcs || in_uart || in_spi || in_sdram;
 
     // DSACK encodings, all confirmed directly against MH030's own
     // rtl/biu_sizing_fsm.sv (next_siz/needs_more), not assumed:
-    //   32-bit port (ROM/GPIO): dsack0_n=0, dsack1_n=0 (both asserted) ->
-    //     port={dsack1_s,dsack0_s}=2'b11, whole request in one beat, zero
-    //     added wait states, matching a real on-chip ROM/register.
+    //   32-bit port (ROM/GPIO/SDCS): dsack0_n=0, dsack1_n=0 (both
+    //     asserted) -> port={dsack1_s,dsack0_s}=2'b11, whole request in
+    //     one beat, zero added wait states, matching a real on-chip
+    //     ROM/register.
     //   16-bit port (SDRAM):    dsack0_n=0, dsack1_n=1 -> port=2'b01.
     //     sdram_done mirrors sdram_adapter's own completion flag directly
     //     -- real wait states here, unlike ROM/GPIO, since SDRAM access
     //     genuinely takes many cycles (activate/CAS-latency/etc).
-    //   8-bit port (UART):      dsack0_n=1, dsack1_n=0 -> port=2'b10.
-    //     dsack1_n mirrors the uart wrapper's own dtack_n directly (it
-    //     already does its own internal Wishbone-cycle wait).
-    assign dsack0_n = (in_rom || in_gpio) ? 1'b0 :
-                       in_sdram            ? !sdram_done :
-                                             1'b1;
-    assign dsack1_n = (in_rom || in_gpio) ? 1'b0 :
-                       in_uart             ? uart_dtack_n :
-                                             1'b1;
+    //   8-bit port (UART/SPI):  dsack0_n=1, dsack1_n=0 -> port=2'b10.
+    //     dsack1_n mirrors the relevant wrapper's own dtack_n directly
+    //     (both already do their own internal Wishbone-cycle wait).
+    assign dsack0_n = (in_rom || in_gpio || in_sdcs) ? 1'b0 :
+                       in_sdram                        ? !sdram_done :
+                                                          1'b1;
+    assign dsack1_n = (in_rom || in_gpio || in_sdcs) ? 1'b0 :
+                       in_uart                          ? uart_dtack_n :
+                       in_spi                           ? spi_dtack_n :
+                                                          1'b1;
 
     // ─── ROM: on-chip, longword-indexed. Registered (synchronous) read --
     // deliberately the real BRAM-inferable idiom (single indexed write-
@@ -207,6 +224,21 @@ module mackerel_030f (
             led_r <= ext_d_out[7:0];
     end
     assign led = led_r;
+
+    // ─── SDCS: single write-only register driving the microSD card's own
+    // CS# (sd_d3, "sd_d3_csn" per ulx3s_v20.lpf's own comment). tiny_spi
+    // has no slave-select output of its own -- software toggles this
+    // register directly, matching Mackerel-F's own identical convention
+    // (its own `assign cs_spi_sd = ~gpio[6];`). D[0]=1 asserts CS (drives
+    // sd_d3 low).
+    reg sdcs_r = 1'b0;
+    always @(posedge clk_4x or negedge rst_n) begin
+        if (!rst_n)
+            sdcs_r <= 1'b0;
+        else if (in_sdcs && !ext_rw)
+            sdcs_r <= ext_d_out[0];
+    end
+    assign sd_d3 = !sdcs_r;
 
     // ─── UART: real OpenCores 16550, via the Mackerel-F-derived wrapper.
     // reg_addr = ext_a[2:0] directly -- the 8 registers are byte-addressed
@@ -231,6 +263,28 @@ module mackerel_030f (
         .irq      (),           // no interrupt controller yet
         .rx       (ftdi_txd),
         .tx       (ftdi_rxd)
+    );
+
+    // ─── SPI: real OpenCores tiny_spi, via the Mackerel-F-derived wrapper,
+    // for the onboard microSD slot. reg_addr = ext_a[2:0] directly, same
+    // byte-addressed-1:1 convention as UART. CS is NOT part of this core
+    // (see the sdcs_r register above) -- tiny_spi has no slave-select pin.
+    wire       spi_dtack_n;
+    wire [7:0] spi_data_out;
+    spi u_spi (
+        .clk      (clk_4x),
+        .rst_n    (rst_n),
+        .cs_n     (!in_spi),
+        .reg_addr (ext_a[2:0]),
+        .rwn      (ext_rw),
+        .ds_n     (ext_ds_n),
+        .data_in  (ext_d_out[7:0]),
+        .data_out (spi_data_out),
+        .dtack_n  (spi_dtack_n),
+        .irq      (),           // no interrupt controller yet
+        .mosi     (sd_cmd),
+        .sck      (sd_clk),
+        .miso     (sd_d0)
     );
 
     // ─── SDRAM: off-chip, via sdram_adapter.v (which wraps the vendored
@@ -273,6 +327,7 @@ module mackerel_030f (
     // own 8-bit reads above.
     assign ext_d_in = in_rom   ? rom_dout_r :
                        in_uart  ? {4{uart_data_out}} :
+                       in_spi   ? {4{spi_data_out}} :
                        in_sdram ? {sdram_rdata, sdram_rdata} :
                                   32'h00000000;
 
