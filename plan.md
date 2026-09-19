@@ -273,6 +273,75 @@ physical board in hand yet to load the bitstream onto; and getting a
 trustworthy Fmax number is still separate future work (proper
 timing-driven synthesis with a real clock constraint).
 
+### UART increment (2026-09-19)
+
+Added the UART console — the next item in the plan's own bring-up order
+after ROM+LED. Reused Mackerel-F's own approach essentially unchanged:
+the same OpenCores `uart16550` core (`cores/uart16550`, fetched by
+`cores/get_cores.sh`, plain Verilog-2001, no sv2v flattening needed)
+behind the same wrapper shape as Mackerel-F's own `pld/mackerel-f/
+uart.v` (`pld/mackerel-030f/uart.v`, adapted essentially unchanged — the
+underlying core doesn't care which CPU is on the other side of the
+wrapper's own simple `cs_n/reg_addr/rwn/ds_n/data_in/data_out/dtack_n`
+interface).
+
+**New memory-map entry**: UART at `0xFFFFFF10-0xFFFFFF17` (8 registers,
+byte-addressed 1:1, unlike Mackerel-F's own word-strided 16-bit-bus
+layout). This is the first genuinely **8-bit-port** peripheral in the
+design (vs. ROM/GPIO's 32-bit port) — confirms MH030's own dynamic bus
+sizing handles a real narrow peripheral correctly, not just the trivial
+full-width case: `dsack1_n` mirrors the wrapper's own `dtack_n` directly
+(port=2'b10 decoding, confirmed the same way as the 32-bit case against
+`biu_sizing_fsm.sv`), `dsack0_n` stays inactive throughout.
+
+**Boot program extended** (`boot.s`/`rom.hex`): configures the UART for
+9600 baud/8N1 (divisor 651=$0288 for the 100MHz `clk_4x` fed to
+`wb_clk_i`), then polls LSR's THRE bit each loop iteration and
+transmits a fixed test byte (`'U'`/$55, chosen for its recognizable
+01010101 bit pattern) when ready — alongside the existing LED counter.
+New instructions needed real care: `MOVE.B #imm,(d16,An)` (opcode
+`$137C`, mode 101 = address-register-indirect-with-16-bit-displacement,
+genuinely simpler than the indexed `(d8,An,Xn)` mode since it's a single
+plain 16-bit displacement extension word, not a brief/full-format
+index byte) and the static-bit-test form of `BTST #n,Dn` (`$08xx`
+family). Every displacement (`BEQ.S`/`BNE.S`/`BRA.S`) computed twice,
+independently, from scratch, and cross-checked — caught one bug in the
+*checking script itself* (a mislabeled target in the first pass, not in
+the actual assembled program) before trusting the result.
+
+**Synthesis result — a genuine, unplanned bonus finding**: this build
+used the full `synth_lattice` recipe (no `-nolutram`, unlike the
+Step 0b feasibility check), and the boot ROM's `reg [31:0] rom[0:1023]`
+array — written from the start using the real BRAM-inferable idiom
+(registered/synchronous read) specifically discussed with the user
+earlier as a *theoretical* lever for freeing up LUTs — **actually
+inferred to 2 real `DP16KD` block-RAM cells this time**, plus 4 small
+`TRELLIS_DPR16X4` distributed-RAM cells from the UART's own internal
+FIFOs. Confirms that discussion's conclusion in practice, not just in
+theory: writing arrays in the synchronous-read idiom is enough on its
+own, on any target, with zero vendor-specific pragmas. `check`
+reported 0 problems.
+
+| | This build | Cut-1 (ROM+GPIO only) |
+|---|---|---|
+| LUT4 (pre-pack) | 64,397/83,640 (76%) | 64,161/83,640 (76%) |
+| DFFs | 13,159/83,640 (16%) | 12,694/83,640 (15%) |
+| Block RAM | 2 DP16KD + 4 DPR16X4 | 0 |
+
+Essentially unchanged resource usage despite adding a real UART core —
+the block-RAM ROM saved roughly what the new UART logic cost.
+
+**Place-and-route**: launched against the real `.lpf`, same as cut 1 —
+every port (including the now-live `ftdi_rxd`/`ftdi_txd`) matched a
+real physical pad and the PLL placed onto real `EHXPLL` hardware.
+Result pending at time of writing this entry — update once complete,
+matching cut 1's own already-established pattern (structural
+success/error count is what matters; Fmax is not meaningful with this
+synthesis recipe).
+
+**Not tested on real hardware** — same gap as cut 1: no board in hand,
+`.lpf` still the v3.1.6 stand-in.
+
 ### Step 1 progress (2026-09-18)
 
 **Toolchain:** homebrew only packages `nextpnr-ice40`, not

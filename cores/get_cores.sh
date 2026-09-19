@@ -44,4 +44,17 @@ clone_core mh030 https://github.com/harrowm/MH030.git
 # so it's available once that stretch goal is picked up.
 clone_core mh882 https://github.com/harrowm/mh882.git
 
+# OpenCores 16550-compatible UART -- the same core Mackerel-F itself uses
+# (freecores GitHub mirror, matching its own get_cores.sh exactly).
+clone_core_full() {
+    local name="$1" url="$2" dest="$CORES_DIR/$1"
+    if [ -d "$dest" ]; then
+        echo "Skipping $name (already present at $dest)"
+        return
+    fi
+    echo "Cloning $name into $dest..."
+    git clone --depth 1 "$url" "$dest"
+}
+clone_core_full uart16550 https://github.com/freecores/uart16550.git
+
 echo "Done."

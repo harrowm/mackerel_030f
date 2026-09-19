@@ -1,6 +1,7 @@
 # External cores, fetched by cores/get_cores.sh -- never vendored
 cores/mh030/
 cores/mh882/
+cores/uart16550/
 
 # Synthesis / P&R build outputs
 pld/mackerel-030f/impl/
