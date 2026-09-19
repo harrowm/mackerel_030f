@@ -48,14 +48,17 @@ module mackerel_030f (
 
     // Onboard microSD slot, SPI mode -- pin names/roles confirmed
     // directly against ulx3s_v20.lpf's own comments (sd_cmd_di=MOSI,
-    // sd_d0_do=MISO, sd_d3_csn=CS#). sd_d[1]/sd_d[2] deliberately not
-    // declared -- the .lpf's own note says leaving them unused avoids a
-    // conflict with the onboard ESP32's wifi_gpio4/12, which this
-    // project doesn't use.
+    // sd_d0_do=MISO, sd_d3_csn=CS#). sd_d must be declared as the real
+    // 4-bit array ulx3s_v20.lpf itself constrains ("sd_d[3]"/"sd_d[0]",
+    // not separate scalar "sd_d3"/"sd_d0" ports -- nextpnr's own
+    // "IO 'sd_d3' is unconstrained in LPF" error caught this mismatch
+    // directly) -- only bits [3] (CS#, output) and [0] (MISO, input) are
+    // ever driven/read below; [2:1] are deliberately left unconnected,
+    // matching the .lpf's own note that doing so avoids a conflict with
+    // the onboard ESP32's wifi_gpio4/12, which this project doesn't use.
     output wire sd_clk,
     output wire sd_cmd,
-    input  wire sd_d0,
-    output wire sd_d3
+    inout  wire [3:0] sd_d
 );
 
     // ─── Clock: 25 MHz board osc -> 100 MHz clk_4x (25 MHz external bus) ───
@@ -238,7 +241,7 @@ module mackerel_030f (
         else if (in_sdcs && !ext_rw)
             sdcs_r <= ext_d_out[0];
     end
-    assign sd_d3 = !sdcs_r;
+    assign sd_d[3] = !sdcs_r;
 
     // ─── UART: real OpenCores 16550, via the Mackerel-F-derived wrapper.
     // reg_addr = ext_a[2:0] directly -- the 8 registers are byte-addressed
@@ -284,7 +287,7 @@ module mackerel_030f (
         .irq      (),           // no interrupt controller yet
         .mosi     (sd_cmd),
         .sck      (sd_clk),
-        .miso     (sd_d0)
+        .miso     (sd_d[0])
     );
 
     // ─── SDRAM: off-chip, via sdram_adapter.v (which wraps the vendored
