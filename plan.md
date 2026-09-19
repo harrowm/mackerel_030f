@@ -215,9 +215,11 @@ of those projects' own memory/plan files.
   (Crowd Supply's current batch ships v3.1.7/v3.1.8, not yet published
   upstream; using v3.1.6 as a stand-in has been fine for toolchain
   validation)
-- [x] **Step 3: `mackerel_030f.v` top-level glue module — first cut
-  (ROM + GPIO/LED only) written, synthesized, placed, routed, and
-  packed into a real bitstream against the actual ULX3S `.lpf`. See
+- [x] **Step 3: `mackerel_030f.v` top-level glue module — ROM + GPIO/LED
+  + UART console, all written, synthesized, placed, routed, and packed
+  into a real bitstream against the actual ULX3S `.lpf` (three
+  successful builds in a row: bare core, cut-1 top level, UART
+  increment). See
   "Step 3 first cut result" below. Not yet loaded onto real hardware —
   no board in hand yet, and the `.lpf` is still the v3.1.6 stand-in.**
 
@@ -334,10 +336,12 @@ the block-RAM ROM saved roughly what the new UART logic cost.
 **Place-and-route**: launched against the real `.lpf`, same as cut 1 —
 every port (including the now-live `ftdi_rxd`/`ftdi_txd`) matched a
 real physical pad and the PLL placed onto real `EHXPLL` hardware.
-Result pending at time of writing this entry — update once complete,
-matching cut 1's own already-established pattern (structural
-success/error count is what matters; Fmax is not meaningful with this
-synthesis recipe).
+**"Program finished normally." 0 errors, 13 warnings.** 236,912 routing
+arcs, all routed. `ecppack` produced a real 1.29 MB `.bit` bitstream.
+Third structural success in a row (cut-1 bare core, cut-1 top level,
+this UART increment), each with real board-pin constraints and zero
+errors. Fmax (1.60 MHz) is, as established for both prior runs, not
+meaningful — same non-timing-driven synthesis shortcut.
 
 **Not tested on real hardware** — same gap as cut 1: no board in hand,
 `.lpf` still the v3.1.6 stand-in.
