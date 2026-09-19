@@ -19,12 +19,21 @@ clone_core() {
         return
     fi
     echo "Cloning $name into $dest..."
-    # --depth 1: this repo only ever needs the core's current RTL, not its
-    # own commit history (that belongs in the core's own repo) -- also
-    # avoids re-transferring MH030's full history of docs/*.pdf blobs
-    # across many historical commits, which made a full clone unreliable
-    # over a throttled connection during initial testing.
-    git clone --depth 1 "$url" "$dest"
+    # This repo only ever needs the core's current rtl/ -- not its own
+    # commit history (that belongs in the core's own repo), and not its
+    # docs/*.pdf reference manuals (tens of MB, irrelevant to a build
+    # dependency). A plain (even --depth 1) clone still transfers every
+    # blob in the current tree, including those PDFs, which repeatedly
+    # failed over a throttled connection during initial testing (three
+    # separate HTTP/2 disconnects). A blobless partial clone + cone-mode
+    # sparse-checkout limited to rtl/ avoids fetching those blobs at all.
+    git clone --filter=blob:none --no-checkout --depth 1 "$url" "$dest"
+    (
+        cd "$dest"
+        git sparse-checkout init --cone
+        git sparse-checkout set rtl
+        git checkout main
+    )
 }
 
 # MH030: cycle-accurate MC68030 CPU core (this project's own m68030_top)
