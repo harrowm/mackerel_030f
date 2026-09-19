@@ -1,12 +1,17 @@
 // Mackerel-030F Top Level SoC Module — ULX3S (Lattice ECP5-85F)
 //
-// Bring-up cut 2 (plan.md step 3/8): on-chip ROM + GPIO (LED) register +
-// UART console, via the same OpenCores uart16550 core Mackerel-F itself
-// uses (cores/uart16550, fetched by cores/get_cores.sh) behind its own
-// proven wrapper (uart.v, adapted from Mackerel-F's pld/mackerel-f/uart.v
-// essentially unchanged). No SDRAM/SPI/interrupts yet — those are
-// separate, later increments per plan.md's own staged bring-up order,
-// deliberately not all attempted at once.
+// Bring-up cut 3 (plan.md step 3/8): on-chip ROM + GPIO (LED) register +
+// UART console + real off-chip SDRAM. UART via the same OpenCores
+// uart16550 core Mackerel-F itself uses (cores/uart16550, fetched by
+// cores/get_cores.sh) behind its own proven wrapper (uart.v, adapted from
+// Mackerel-F's pld/mackerel-f/uart.v essentially unchanged). SDRAM via
+// vendor/sdram_16bit.v (EMARD's ULX3S-cleaned-up Next186 SoC controller)
+// behind sdram_adapter.v -- see that file's own header for the real
+// parameters (confirmed against ulx3s_v20.lpf's own pin list, not
+// assumed) and the refresh-timing bug found and fixed in the vendored
+// defaults. No SPI/interrupts yet — those are separate, later increments
+// per plan.md's own staged bring-up order, deliberately not all
+// attempted at once.
 //
 // Drops m68030_top (cores/mh030/rtl/m68030_top.sv) in place of Mackerel-F's
 // own fx68k, onto its real, pin-accurate MC68030 bus: 32-bit data, single
@@ -26,7 +31,20 @@ module mackerel_030f (
     // FPGA's OWN transmit pin (named for the FTDI chip's RXD input it
     // drives), "ftdi_txd" is the FPGA's OWN receive pin.
     output wire ftdi_rxd,    // FPGA -> FTDI (this is the FPGA's UART TX)
-    input  wire ftdi_txd     // FTDI -> FPGA (this is the FPGA's UART RX)
+    input  wire ftdi_txd,    // FTDI -> FPGA (this is the FPGA's UART RX)
+
+    // SDRAM (real off-chip MT48LC32M16-class part -- pins/widths confirmed
+    // directly against ulx3s_v20.lpf, not assumed).
+    output wire        sdram_clk,
+    output wire        sdram_cke,
+    output wire        sdram_csn,
+    output wire        sdram_wen,
+    output wire        sdram_rasn,
+    output wire        sdram_casn,
+    output wire [12:0] sdram_a,
+    output wire [1:0]  sdram_ba,
+    output wire [1:0]  sdram_dqm,
+    inout  wire [15:0] sdram_d
 );
 
     // ─── Clock: 25 MHz board osc -> 100 MHz clk_4x (25 MHz external bus) ───
@@ -122,10 +140,19 @@ module mackerel_030f (
     wire avec_n_w  = !iack;
 
     // ─── Memory map ──────────────────────────────────────────────────────
-    //   ROM   0x00000000-0x00000FFF   4 KB, on-chip, $readmemh
-    //   GPIO  0xFFFFFF00               1 register (write: D[7:0] -> led)
-    //   UART  0xFFFFFF10-0xFFFFFF17   8 registers (uart16550 register map)
+    //   ROM    0x00000000-0x00000FFF   4 KB, on-chip, $readmemh
+    //   GPIO   0xFFFFFF00               1 register (write: D[7:0] -> led)
+    //   UART   0xFFFFFF10-0xFFFFFF17   8 registers (uart16550 register map)
+    //   SDRAM  0x02000000-0x03FFFFFF  32 MB, off-chip
     //   (else) unmapped -> BERR via watchdog
+    //
+    // SDRAM deliberately lives at a high, cleanly-decodable address
+    // (bit 25 set, nothing else) rather than the "real" low-address
+    // Mackerel-F-style layout (SDRAM at 0, ROM shadowed out after boot) --
+    // that shadow-boot trick is a deliberately separate, not-yet-done
+    // refinement (plan.md step 4), kept out of scope for this increment
+    // so ROM's own ex 0 mapping (already working, already tested through
+    // two prior increments) doesn't need touching.
     //
     // Real data-phase gate: for a 68030 write cycle AS asserts at S1 but
     // DS doesn't assert until S3 (data isn't stable until then) -- unlike
@@ -135,26 +162,27 @@ module mackerel_030f (
     // CLAUDE.md S-State Signal Timing section.
     wire cyc_active = !ext_ds_n;
 
-    wire in_rom  = cyc_active && (ext_a[31:12] == 20'h00000);
-    wire in_gpio = cyc_active && (ext_a == 32'hFFFFFF00);
-    wire in_uart = cyc_active && (ext_a[31:8] == 24'hFFFFFF) && (ext_a[7:3] == 5'b00010);
-    wire in_any  = in_rom || in_gpio || in_uart;
+    wire in_rom   = cyc_active && (ext_a[31:12] == 20'h00000);
+    wire in_gpio  = cyc_active && (ext_a == 32'hFFFFFF00);
+    wire in_uart  = cyc_active && (ext_a[31:8] == 24'hFFFFFF) && (ext_a[7:3] == 5'b00010);
+    wire in_sdram = cyc_active && (ext_a[31:25] == 7'b0000001);
+    wire in_any   = in_rom || in_gpio || in_uart || in_sdram;
 
-    // 32-bit-port DSACK encoding for ROM/GPIO, confirmed directly against
-    // MH030's own rtl/biu_sizing_fsm.sv (next_siz/needs_more):
-    // dsack1_n=0,dsack0_n=0 (both asserted) decodes as
-    // port={dsack1_s,dsack0_s}=2'b11 -> 32-bit port, whole request
-    // satisfied in one beat. Zero added wait states, matching a real
-    // on-chip ROM/register.
-    //
-    // UART is a genuine 8-bit-wide peripheral (the real OpenCores 16550
-    // core's own native register width) -- same source, port=2'b10
-    // decodes as 8-bit: dsack1_n asserted, dsack0_n inactive. dsack1_n
-    // mirrors the uart wrapper's own dtack_n exactly (it already does its
-    // own internal Wishbone-cycle wait, so this glue doesn't need a
-    // separate wait-state count the way Mackerel-F's own DTACK mux
-    // doesn't either).
-    assign dsack0_n = !(in_rom || in_gpio);
+    // DSACK encodings, all confirmed directly against MH030's own
+    // rtl/biu_sizing_fsm.sv (next_siz/needs_more), not assumed:
+    //   32-bit port (ROM/GPIO): dsack0_n=0, dsack1_n=0 (both asserted) ->
+    //     port={dsack1_s,dsack0_s}=2'b11, whole request in one beat, zero
+    //     added wait states, matching a real on-chip ROM/register.
+    //   16-bit port (SDRAM):    dsack0_n=0, dsack1_n=1 -> port=2'b01.
+    //     sdram_done mirrors sdram_adapter's own completion flag directly
+    //     -- real wait states here, unlike ROM/GPIO, since SDRAM access
+    //     genuinely takes many cycles (activate/CAS-latency/etc).
+    //   8-bit port (UART):      dsack0_n=1, dsack1_n=0 -> port=2'b10.
+    //     dsack1_n mirrors the uart wrapper's own dtack_n directly (it
+    //     already does its own internal Wishbone-cycle wait).
+    assign dsack0_n = (in_rom || in_gpio) ? 1'b0 :
+                       in_sdram            ? !sdram_done :
+                                             1'b1;
     assign dsack1_n = (in_rom || in_gpio) ? 1'b0 :
                        in_uart             ? uart_dtack_n :
                                              1'b1;
@@ -205,10 +233,48 @@ module mackerel_030f (
         .tx       (ftdi_rxd)
     );
 
+    // ─── SDRAM: off-chip, via sdram_adapter.v (which wraps the vendored
+    // sdram_16bit.v core). Single-word (16-bit) transactions only -- MH030's
+    // own dynamic bus sizing (16-bit-port DSACK encoding above) handles all
+    // byte/word/longword iteration on the CPU side automatically, so this
+    // adapter never needs to know the original request size.
+    wire        sdram_done;
+    wire [15:0] sdram_rdata;
+    sdram_adapter u_sdram (
+        .clk        (clk_4x),
+        .rst_n      (rst_n),
+
+        .req        (in_sdram),
+        .word_addr  (ext_a[24:1]),
+        .wr         (!ext_rw),
+        .wdata      (ext_d_out[31:16]),  // word write value per
+                                          // biu_byte_lane_ctrl's own
+                                          // convention (word in [31:16])
+        .rdata      (sdram_rdata),
+        .done       (sdram_done),
+
+        .sdram_clk  (sdram_clk),
+        .sdram_cke  (sdram_cke),
+        .sdram_csn  (sdram_csn),
+        .sdram_wen  (sdram_wen),
+        .sdram_rasn (sdram_rasn),
+        .sdram_casn (sdram_casn),
+        .sdram_a    (sdram_a),
+        .sdram_ba   (sdram_ba),
+        .sdram_dqm  (sdram_dqm),
+        .sdram_d    (sdram_d)
+    );
+
     // ─── Data bus input mux (CPU read side) ─────────────────────────────
-    assign ext_d_in = in_rom  ? rom_dout_r :
-                       in_uart ? {4{uart_data_out}} :
-                                 32'h00000000;
+    // SDRAM's 16-bit read value is replicated onto both halves of
+    // ext_d_in[31:0], mirroring biu_byte_lane_ctrl's own write-side word
+    // replication convention (word in [31:16], repeated onto [15:0]) --
+    // the same symmetric-replication approach already used for the UART's
+    // own 8-bit reads above.
+    assign ext_d_in = in_rom   ? rom_dout_r :
+                       in_uart  ? {4{uart_data_out}} :
+                       in_sdram ? {sdram_rdata, sdram_rdata} :
+                                  32'h00000000;
 
     // ─── Bus watchdog: BERR on any access to unmapped space. Mirrors
     // Mackerel-F's own bus_watchdog.v, adapted for DSACK-based

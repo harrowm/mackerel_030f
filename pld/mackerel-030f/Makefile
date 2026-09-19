@@ -50,7 +50,7 @@ MH030_SRCS = \
     $(MH030)/m68030_mmu.sv \
     $(MH030)/m68030_top.sv
 
-GLUE_SRCS = mackerel_030f.v clk_pll.v uart.v
+GLUE_SRCS = mackerel_030f.v clk_pll.v uart.v sdram_adapter.v vendor/sdram_16bit.v
 
 # OpenCores uart16550 -- the same core Mackerel-F itself uses. Plain
 # Verilog-2001, no sv2v flattening needed (unlike MH030's SV).
