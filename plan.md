@@ -216,12 +216,13 @@ of those projects' own memory/plan files.
   upstream; using v3.1.6 as a stand-in has been fine for toolchain
   validation)
 - [x] **Step 3: `mackerel_030f.v` top-level glue module — ROM + GPIO/LED
-  + UART console, all written, synthesized, placed, routed, and packed
-  into a real bitstream against the actual ULX3S `.lpf` (three
-  successful builds in a row: bare core, cut-1 top level, UART
-  increment). See
-  "Step 3 first cut result" below. Not yet loaded onto real hardware —
-  no board in hand yet, and the `.lpf` is still the v3.1.6 stand-in.**
+  + UART console + real off-chip SDRAM, all written, synthesized,
+  placed, routed, and packed into a real bitstream against the actual
+  ULX3S `.lpf` (four successful builds in a row: bare core, cut-1 top
+  level, UART increment, SDRAM increment). See "Step 3 first cut
+  result" and "SDRAM increment" below. Not yet loaded onto real
+  hardware — no board in hand yet, and the `.lpf` is still the v3.1.6
+  stand-in.**
 
 ### Step 3 first cut result (2026-09-19)
 
@@ -519,6 +520,95 @@ likely why it ran unbounded for 39+ minutes last time — no target to
 converge toward), or (b) do one proper, complete, timing-driven
 synthesis + P&R run against the real Step 3 top-level module + `.lpf`
 once both exist, instead of the bare core.
+
+### SDRAM increment (2026-09-19)
+
+Added real off-chip SDRAM — the one item plan.md's own step 6 had
+flagged from the start as "the one real new engineering item," unlike
+ROM/GPIO/UART which were all straightforward adaptations.
+
+**Controller choice.** ULX3S's own official examples repo
+(`emard/ulx3s-misc`, `examples/sdram/sdram_16bit/hdl/sdram_16bit.v`) has
+a real, complete SDR SDRAM controller (originally from the Next186 SoC
+PC project, Nicolae Dumitrache, cleaned up by EMARD for ULX3S) whose
+default row/column/bank parameters (13/9/2) match ULX3S's actual SDRAM
+*exactly* — confirmed directly against `ulx3s_v20.lpf`'s own pin list
+(13 address bits + 2 bank bits + 16-bit data = standard 4-bank x
+8192-row x 512-col x 16-bit SDR SDRAM, 32 MB), not assumed from a
+datasheet. Vendored as a single file (`vendor/sdram_16bit.v`, with
+attribution — not fetched via `get_cores.sh`, since it's one file from
+a larger examples repo, not a standalone dependency repo).
+
+**A real bug found and fixed before it could corrupt data on
+hardware.** The vendored core's own default refresh-interval parameter
+(`C_RFB=11`) gives a 20.48us refresh interval at clk_4x's 100MHz — the
+JEDEC spec (64ms/8192 rows) requires refreshing at least every ~7.81us,
+so the default is **2.6x too infrequent**, a real silent-data-loss risk
+on actual silicon, not a performance nit. Found by direct calculation
+(not by trusting the vendored default) and fixed via `C_RFB=9` (5.12us
+interval, comfortable margin under the requirement).
+
+**Every SDR SDRAM command the core issues verified by hand** against
+the real JEDEC command truth table (`{CS#,WE#,RAS#,CAS#}`, matching the
+core's own port name/bit order) before trusting it: PRECHARGE (`0001`),
+MODE-REGISTER-SET (`0000`), ACTIVATE (`0101`), READ (`0110`), WRITE
+(`0010`), AUTO-REFRESH (`0100`), BURST-STOP (`0011`) — all correct.
+
+**`sdram_adapter.v`** wraps the core with a single-word (16-bit,
+`C_PitchBits=0`, no burst pairing) transaction FSM matching MH030's own
+confirmed 16-bit-port DSACK encoding (`dsack0_n` asserted, `dsack1_n`
+inactive — the mirror image of the UART's 8-bit case, both derived
+directly from `biu_sizing_fsm.sv`). MH030's own dynamic bus sizing
+handles all byte/word/longword iteration on the CPU side automatically,
+so the adapter never needs to know the original request size. Uses the
+core's fast RD1 read command (not the slower RD2 burst-read path, which
+this single-word adapter never needs) and its own `sys_cmd_ack`
+returning to zero as a single uniform read/write completion signal.
+
+**Memory map**: `0x02000000-0x03FFFFFF` (32 MB) — a high, cleanly
+bit-decodable address rather than the "real" low-address Mackerel-F-
+style layout (SDRAM at 0, ROM shadowed out after boot). That shadow-boot
+redesign (plan.md step 4) is a deliberately separate, still-not-done
+refinement, kept out of scope here so ROM's own address-0 mapping
+(already working through three prior increments) didn't need touching.
+
+**Synthesis**: 0 problems. A genuinely nice confirmation of correctness
+at the structural level: the bidirectional `sdram_d[15:0]` bus produced
+**exactly 16 `$_TBUF_` (tri-state buffer) cells** — matching the bus
+width precisely, and later mapping cleanly to real tri-state I/O bels
+during place & route (see below). Resource usage grew modestly and
+consistently from the UART increment:
+
+| | SDRAM increment | UART increment |
+|---|---|---|
+| LUT4 (pre-pack) | 65,586/83,640 (78%) | 64,397/83,640 (76%) |
+| DFFs | 13,393/83,640 (16%) | 13,159/83,640 (16%) |
+| Block RAM | 2 DP16KD + 4 DPR16X4 (unchanged) | 2 DP16KD + 4 DPR16X4 |
+| Tri-state buffers | 16 `$_TBUF_` (new) | 0 |
+
+**Place-and-route**: launched against the real `.lpf`, which already
+has all the real `sdram_*` pin names. **All 39 SDRAM pins** (clock,
+6 control signals, 13 address, 2 bank, 2 DQM, 16 data) **matched real
+physical board pads with zero errors**, and `sdram_clk` was
+automatically promoted to a global clock network — exactly the right
+treatment for a controller's own output clock. **"Program finished
+normally." 0 errors, 13 warnings.** 241,269 routing arcs, all routed.
+`ecppack` produced a real 1.28 MB `.bit` bitstream. Fourth consecutive
+structural success with zero errors.
+
+**What this does and doesn't confirm.** Unlike ROM/GPIO/UART — simple
+enough that structural P&R success was a reasonable proxy for real
+correctness — an SDRAM controller is exactly the kind of thing that can
+place, route, and pass every structural check while still being subtly
+wrong in ways only a real functional test can catch (timing-critical
+protocol sequencing, refresh correctness, etc.). Structural success
+here confirms the wiring, pin assignment, and command encoding are
+correct as far as static analysis can tell — it does **not** confirm
+the controller actually works correctly against real SDRAM silicon.
+Genuine confidence would need either a real SDRAM behavioral-model
+simulation (Micron/JEDEC-generic Verilog models exist publicly for
+exactly this kind of pre-hardware validation, not yet attempted here)
+or actual board testing. Flagged explicitly, not glossed over.
 
 ## Board selection history
 
