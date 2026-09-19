@@ -216,13 +216,13 @@ of those projects' own memory/plan files.
   upstream; using v3.1.6 as a stand-in has been fine for toolchain
   validation)
 - [x] **Step 3: `mackerel_030f.v` top-level glue module — ROM + GPIO/LED
-  + UART console + real off-chip SDRAM, all written, synthesized,
-  placed, routed, and packed into a real bitstream against the actual
-  ULX3S `.lpf` (four successful builds in a row: bare core, cut-1 top
-  level, UART increment, SDRAM increment). See "Step 3 first cut
-  result" and "SDRAM increment" below. Not yet loaded onto real
-  hardware — no board in hand yet, and the `.lpf` is still the v3.1.6
-  stand-in.**
+  + UART console + real off-chip SDRAM + SPI/microSD, all written,
+  synthesized, placed, routed, and packed into a real bitstream against
+  the actual ULX3S `.lpf` (five successful builds in a row: bare core,
+  cut-1 top level, UART, SDRAM, SPI/SD). See "Step 3 first cut result",
+  "SDRAM increment", and "SPI/SD card increment" below. Not yet loaded
+  onto real hardware — no board in hand yet, and the `.lpf` is still
+  the v3.1.6 stand-in.**
 
 ### Step 3 first cut result (2026-09-19)
 
@@ -609,6 +609,87 @@ Genuine confidence would need either a real SDRAM behavioral-model
 simulation (Micron/JEDEC-generic Verilog models exist publicly for
 exactly this kind of pre-hardware validation, not yet attempted here)
 or actual board testing. Flagged explicitly, not glossed over.
+
+### SPI/SD card increment (2026-09-19)
+
+Added the onboard microSD slot (SPI mode) — same pattern as UART:
+reused the OpenCores `tiny_spi` core Mackerel-F itself uses, behind a
+wrapper adapted essentially unchanged from Mackerel-F's own
+`pld/mackerel-f/spi.v`. Pin roles (`sd_cmd`=MOSI, `sd_d[0]`=MISO,
+`sd_d[3]`=CS#, `sd_clk`=SCK) confirmed directly against
+`ulx3s_v20.lpf`'s own comments. `tiny_spi` has no chip-select output of
+its own, so a new SDCS register (`0xFFFFFF08`) drives `sd_d[3]`
+directly from software — the same convention Mackerel-F itself uses.
+New SPI registers at `0xFFFFFF20-0xFFFFFF24` (8-bit port, same DSACK
+encoding already established for UART). RTL-only this increment, same
+scope precedent as SDRAM — no boot-ROM SD driver yet (real SD
+initialization is a substantial software task on its own).
+
+**Two real bugs found, both caught by the toolchain itself, not by
+inspection:**
+
+1. **`sd_d` port naming.** First attempt declared separate scalar ports
+   `sd_d0`/`sd_d3`. `nextpnr` refused outright: `ERROR: IO 'sd_d3' is
+   unconstrained in LPF`. `ulx3s_v20.lpf` actually declares `sd_d[3]`/
+   `sd_d[0]` as part of one real 4-bit array (`sd_d[3:0]`), not
+   separate scalars. Fixed by declaring `sd_d` as `inout wire [3:0]`,
+   driving only bit 3 and reading only bit 0, leaving `[2:1]`
+   genuinely unconnected (matching the `.lpf`'s own note that doing so
+   avoids a conflict with the onboard ESP32's `wifi_gpio4`/`wifi_gpio12`).
+2. **A real placement-blocking latch in the vendored `tiny_spi` core.**
+   Synthesis reported 2 `$_DLATCH_N_` cells. First assessed (wrongly)
+   as benign: traced to `tiny_spi.v`'s own `spi_seq_next` combinational
+   logic having no `default` case for its 2-bit state register's
+   otherwise-unreachable 4th encoding (confirmed by inspection —
+   `spi_seq` is only ever assigned its 3 named states throughout the
+   whole file). That assessment turned out to be wrong in the way that
+   matters: `nextpnr-ecp5` doesn't support latch primitives *at all* —
+   `ERROR: cell type '$_DLATCH_N_' is unsupported`. A "benign" latch is
+   still a hard placement blocker on this architecture. Fixed by
+   vendoring a patched copy (`vendor/tiny_spi.v`, one line added — an
+   unconditional `spi_seq_next = spi_seq;` default, mirroring the
+   pattern the file's other signals already use) rather than patching
+   the fetched `cores/tiny_spi` copy, which `get_cores.sh` would
+   silently discard on a fresh clone. `get_cores.sh` no longer fetches
+   `tiny_spi` at all — it's vendored only, like `sdram_16bit.v`.
+
+**Synthesis**: 0 problems after the latch fix (confirmed via `stat`
+showing zero `$_DLATCH_N_` cells, down from 2). Resource usage grew
+only modestly from the SDRAM increment:
+
+| | SPI/SD increment | SDRAM increment |
+|---|---|---|
+| LUT4 (pre-pack) | 52,108 core LUT4 (`stat`, unpacked) | 52,292 |
+| CCU2C | 6,639 | 6,635 |
+| TRELLIS_FF | 13,443 | 13,393 |
+| Block RAM | 2 DP16KD + 4 DPR16X4 (unchanged) | 2 DP16KD + 4 DPR16X4 |
+| Tri-state buffers | 16 `$_TBUF_` (unchanged, SDRAM's own) | 16 `$_TBUF_` |
+
+**Place-and-route hit a real, separate toolchain problem worth
+recording**: the first P&R attempt (default seed) placed cleanly at
+first, then went genuinely pathological partway through — one batch of
+1000 placer iterations took **3.6 hours** (up from ~1 second earlier in
+the same run), with wirelength completely flat, after running normally
+for the first ~40 minutes. Killed after burning over 6 real hours with
+zero forward progress. Best explanation: `sd_d[3:0]`+`sd_cmd` are all
+forced by the real board wiring onto the same tightly-clustered I/O
+tile (confirmed in the placer's own log: all constrained to Bels at the
+identical `X0/Y53` coordinate, different `PIO` letters), and the
+default-seed placer's local search hit a bad trajectory trying to
+legalize logic around that congestion point. **Fix: `--randomize-seed`**
+— a fresh RNG seed sidestepped the pathological trajectory entirely;
+the retry completed normally (wirelength decreasing steadily throughout,
+occasional cost spikes that recovered rather than compounded). **Worth
+trying by default for any future increment where placement seems to
+hang** — this is a real, reproducible toolchain quirk with tightly
+grouped forced-location I/O pins, not a one-off.
+
+**Final result**: "Program finished normally." 0 errors, 13 warnings.
+240,421 routing arcs, all routed. All 6 SD-related pins (`sd_clk`,
+`sd_cmd`, `sd_d[3:0]`) matched real physical board pads. `ecppack`
+produced a real 1.27 MB `.bit` bitstream. Fifth consecutive structural
+success (counting the seed retry as part of the same increment, not a
+separate failure).
 
 ## Board selection history
 
