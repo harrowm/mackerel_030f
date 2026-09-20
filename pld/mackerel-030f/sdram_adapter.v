@@ -43,6 +43,31 @@ module sdram_adapter (
     output reg         done,       // stays asserted until req drops (matches
                                     // the CPU releasing AS/DS at cycle end)
 
+    // REAL BUG FOUND via simulation (confirmed by hierarchical signal
+    // tracing): the vendored core's own post-power-on init sequence
+    // doesn't just wait for its `counter[15]` threshold -- after that, it
+    // still has to converge an internal refresh-loop (`rfsh !=
+    // counter[C_RFB]` in vendor/sdram_16bit.v's STATE 4) before it's
+    // genuinely ready for a real command. This is a FIXED, deterministic
+    // number of cycles (both counters are free-running from the same
+    // clk_4x reset-of-time-0, so the relationship never changes no matter
+    // how long the SYSTEM reset is separately extended -- confirmed by
+    // trying exactly that and observing the identical ~126-cycle stall
+    // recur at a shifted absolute time) that, in practice, comes out
+    // close to (and in one measured case, exceeding) MH030's own internal
+    // BIU bus-cycle watchdog (rtl/biu_error_handler.sv, TIMEOUT_CLKS=128
+    // clk_4x cycles) -- a genuine internal Bus Error can fire on the
+    // CPU's very first SDRAM access before the controller has actually
+    // converged, which (since boot.s has no real exception vector table)
+    // corrupts the whole program. Real fix: expose the vendored core's
+    // own genuine readiness indicator -- `sdr_DQM` is actively held at
+    // 2'b11 throughout power-up/refresh-convergence and cleared to 2'b00
+    // (STATE 4's own "else" branch) the instant it's actually ready,
+    // matching real SDR SDRAM chip behavior -- so the top level can gate
+    // CPU reset release on genuine SDRAM readiness instead of a fixed
+    // guess.
+    output wire        ready,
+
     // SDRAM pins (pass through to top level)
     output wire        sdram_clk,
     output wire        sdram_cke,
@@ -79,7 +104,24 @@ module sdram_adapter (
         .C_ColBits   (9),
         .C_RowBits   (13),
         .C_BankBits  (2),
-        .C_RFB       (9)   // see header comment: overridden for correctness at 100MHz
+        .C_RFB       (9),  // see header comment: overridden for correctness at 100MHz
+        // REAL BUG FOUND via simulation: the vendored core's own default
+        // C_WR2=8'h80 (128) sizes STATE 7's post-WRITE-command DLY wait
+        // for its ORIGINAL SoC's own multi-word BURST-write use case
+        // ("01=write WR2 bytes" per the core's own sys_CMD comment) --
+        // completely wrong for this adapter's single-16-bit-word,
+        // no-burst transfers (confirmed via hierarchical signal tracing:
+        // a plain single-word write was taking ~126 extra clk_4x DLY
+        // cycles for no functional reason, coming within a hair of --
+        // and, combined with other timing, actually exceeding -- MH030's
+        // own internal 128-cycle bus-cycle watchdog, corrupting the CPU's
+        // program via a spurious internal Bus Error). The READ path
+        // already correctly uses the core's OWN short/single-beat
+        // constant (C_RD1=8'h10=16, confirmed working via this same
+        // adapter's already-passing SDRAM read-back test) -- overriding
+        // C_WR2 to match it restores that same fast, single-beat shape
+        // for writes instead of a full burst-length wait.
+        .C_WR2       (8'h10)
     ) u_sdram (
         .sys_CLK             (clk),
         .sys_CMD              (cmd_r),
@@ -106,6 +148,7 @@ module sdram_adapter (
     assign sdram_a    = sdr_ADDR;
     assign sdram_ba   = sdr_BA;
     assign sdram_dqm  = sdr_DQM;
+    assign ready      = (sdr_DQM == 2'b00);
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin

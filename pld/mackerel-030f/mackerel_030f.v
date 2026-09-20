@@ -75,13 +75,46 @@ module mackerel_030f (
     // fixed count for margin (mirrors Mackerel-F's own rst_cpu counter
     // shape; m68030_top's own biu_config.sv handles the real internal
     // reset SEQUENCING once rst_n releases — see MH030's CLAUDE.md).
-    reg [15:0] rst_ctr_r = 16'h0;
-    wire rst_n = rst_ctr_r[15];
+    // REAL BUG FOUND via simulation (confirmed by hierarchical signal
+    // tracing across vendor/sdram_16bit.v + MH030's own
+    // rtl/biu_error_handler.sv): the vendored SDRAM controller's own
+    // post-power-on init-wait (`counter[15]` in vendor/sdram_16bit.v)
+    // only marks the precharge/MRS DISPATCH point, not full readiness --
+    // it still has to converge its own refresh-loop (`rfsh !=
+    // counter[C_RFB]` in sdram_16bit.v's STATE 4) before it can accept a
+    // real command, which took ~126 clk_4x cycles in practice. A first
+    // attempt fixed this by simply widening the CPU reset counter
+    // (guessing the two power-on sequences were racing) -- but since both
+    // counters are free-running from the SAME clk_4x cycle 0 with no
+    // randomness anywhere, delaying reset release further just shifts
+    // WHEN this fixed-duration convergence happens, not HOW LONG it
+    // takes (confirmed directly: the identical ~126-cycle stall recurred
+    // at a shifted absolute time after widening the counter). That
+    // ~126-cycle stall came within a hair of, and can in general exceed,
+    // MH030's own internal BIU bus-cycle watchdog (rtl/biu_error_handler.sv,
+    // TIMEOUT_CLKS=128, a DELIBERATE, correct safety net there, not
+    // something to patch) -- a genuine internal Bus Error fired on the
+    // CPU's very first SDRAM access before the controller had actually
+    // converged, which (since boot.s has no real exception vector table)
+    // corrupted the whole program (confirmed via trace: PC ended up
+    // executing from wildly out-of-range addresses immediately after).
+    // Real fix: gate CPU reset release on the vendored core's own genuine
+    // readiness indicator instead of a fixed guess -- sdram_adapter.v's
+    // `ready` output (`sdr_DQM == 2'b00`, matching real SDR SDRAM chip
+    // behavior: DQM is held during power-up/refresh-convergence and
+    // cleared the instant the controller is genuinely ready). The counter
+    // below is kept only as a sane PLL-settling floor (65536 cycles,
+    // widened from the original 32768 for margin), ANDed with real SDRAM
+    // readiness -- see `sdram_ready_w` (declared here, driven by
+    // sdram_adapter u_sdram below) and its use in the rst_n expression.
+    wire sdram_ready_w;
+    reg [16:0] rst_ctr_r = 17'h0;
+    wire rst_n = rst_ctr_r[16] && sdram_ready_w;
     always @(posedge clk_4x or negedge pll_locked) begin
         if (!pll_locked)
-            rst_ctr_r <= 16'h0;
+            rst_ctr_r <= 17'h0;
         else if (!rst_n)
-            rst_ctr_r <= rst_ctr_r + 16'h1;
+            rst_ctr_r <= rst_ctr_r + 17'h1;
     end
 
     // ─── m68030_top external pins ───────────────────────────────────────
@@ -99,6 +132,15 @@ module mackerel_030f (
 
     // This glue's own responses, driven into m68030_top's input ports.
     wire dsack0_n, dsack1_n, berr_n;
+
+    // Forward declarations for signals used in the m68030_top instantiation
+    // below but defined later in this file (autovectoring, peripheral
+    // dtack/done signals) -- Icarus Verilog is stricter than Yosys's own
+    // frontend about forward references inside a port-connection list, so
+    // these are declared up front; the real logic driving them stays at
+    // its original, more readable location further down.
+    wire avec_n_w;
+    wire uart_dtack_n, spi_dtack_n, sdram_done;
 
     m68030_top u_cpu (
         .clk_4x        (clk_4x),
@@ -151,7 +193,7 @@ module mackerel_030f (
     // than leaving it undefined.
     wire cpu_space = (ext_fc == 3'b111);
     wire iack      = cpu_space && !ext_as_n;
-    wire avec_n_w  = !iack;
+    assign avec_n_w = !iack;
 
     // ─── Memory map ──────────────────────────────────────────────────────
     //   ROM    0x00000000-0x00000FFF   4 KB, on-chip, $readmemh
@@ -251,7 +293,6 @@ module mackerel_030f (
     // lanes (confirmed against MH030's own rtl/biu_byte_lane_ctrl.sv), so
     // any fixed 8-bit slice of ext_d_out carries the right value; reads
     // mirror that same replication for symmetry.
-    wire       uart_dtack_n;
     wire [7:0] uart_data_out;
     uart u_uart (
         .clk      (clk_4x),
@@ -272,7 +313,6 @@ module mackerel_030f (
     // for the onboard microSD slot. reg_addr = ext_a[2:0] directly, same
     // byte-addressed-1:1 convention as UART. CS is NOT part of this core
     // (see the sdcs_r register above) -- tiny_spi has no slave-select pin.
-    wire       spi_dtack_n;
     wire [7:0] spi_data_out;
     spi u_spi (
         .clk      (clk_4x),
@@ -295,7 +335,6 @@ module mackerel_030f (
     // own dynamic bus sizing (16-bit-port DSACK encoding above) handles all
     // byte/word/longword iteration on the CPU side automatically, so this
     // adapter never needs to know the original request size.
-    wire        sdram_done;
     wire [15:0] sdram_rdata;
     sdram_adapter u_sdram (
         .clk        (clk_4x),
@@ -309,6 +348,7 @@ module mackerel_030f (
                                           // convention (word in [31:16])
         .rdata      (sdram_rdata),
         .done       (sdram_done),
+        .ready      (sdram_ready_w),
 
         .sdram_clk  (sdram_clk),
         .sdram_cke  (sdram_cke),
