@@ -139,7 +139,32 @@ module sdram_adapter (
         .sdr_DQM             (sdr_DQM)
     );
 
-    assign sdram_clk  = clk;
+    // project_nextpnr_sdram_clk_hold_violation.md fix: a plain `assign
+    // sdram_clk = clk` makes sdram_clk's own net LITERALLY the same net
+    // as the CPU's main 100MHz clock -- nextpnr-ecp5 then has to route
+    // that same net both through the internal global clock distribution
+    // network (reaching every register's own clock pin) AND out to this
+    // one specific physical I/O pad, and checks every internal
+    // register-to-register path's hold time against THAT PAD's own
+    // (later-arriving, extra-hop) clock edge as the domain's reference --
+    // producing wall-to-wall "hold violations" between totally unrelated
+    // internal signals that have nothing to do with the SDRAM interface
+    // at all (confirmed: nextpnr's own --sdc set_false_path is a
+    // documented no-op in this oss-cad-suite build, so no timing
+    // exception can paper over this -- the net itself has to stop being
+    // literally the same as the internal clock tree). Fixed with an
+    // ODDRX1F DDR output register (D0=1, D1=0 forwards SCLK itself,
+    // unchanged frequency/phase) -- the standard ECP5 pattern for
+    // forwarding an internal clock to an output pin through a dedicated
+    // I/O resource instead of tying the pin directly to the internal
+    // clock net.
+    ODDRX1F u_sdram_clk_fwd (
+        .SCLK (clk),
+        .RST  (1'b0),
+        .D0   (1'b1),
+        .D1   (1'b0),
+        .Q    (sdram_clk)
+    );
     assign sdram_cke  = 1'b1;
     assign sdram_csn  = sdr_n_CS_WE_RAS_CAS[3];
     assign sdram_wen  = sdr_n_CS_WE_RAS_CAS[2];

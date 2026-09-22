@@ -691,6 +691,67 @@ produced a real 1.27 MB `.bit` bitstream. Fifth consecutive structural
 success (counting the seed retry as part of the same increment, not a
 separate failure).
 
+### First real hardware bring-up attempt + SDRAM clock hold-violation fix (2026-09-20/21)
+
+First real-hardware synthesis attempt (SDRAM + UART + SPI/SD all wired,
+MH030 CPU core attached) failed with 11 hold-violation errors. Root cause:
+`sdram_adapter.v`'s `assign sdram_clk = clk;` makes the SDRAM clock pin's
+own net literally the same net as the CPU's internal clock tree —
+`nextpnr-ecp5` then routes that one net both through the global clock
+distribution network and out to one specific physical I/O pad, and
+checks every internal register-to-register hold time against that pad's
+own (later-arriving, extra-hop) clock edge as the domain reference,
+producing wall-to-wall spurious hold violations between totally unrelated
+internal CPU signals that have nothing to do with the SDRAM interface.
+`--sdc`'s `set_false_path` was investigated as a fix and confirmed to be
+a documented no-op in this oss-cad-suite build (`strings` on the
+`nextpnr-ecp5` binary: `"...does not do anything(yet)."`), ruling out a
+timing-exception workaround. **Fixed** with an `ODDRX1F` DDR output
+register (`D0=1, D1=0` forwards SCLK itself at unchanged frequency/phase)
+— the standard ECP5 pattern for forwarding an internal clock to an output
+pin through a dedicated I/O resource instead of a bare wire tie. New
+`pld/mackerel-030f/sim/oddrx1f_sim.v` behavioral stub added (oss-cad-suite
+ships `ODDRX1F` as a blackbox only), mirroring the existing
+`clk_pll.v`/`clk_pll_sim.v` pattern already established in this directory.
+
+With the ODDRX1F fix in place, place-and-route succeeded (0 errors, via
+`--randomize-seed` — the default seed's router got stuck, matching the
+SPI/SD increment's own already-documented precedent above) but revealed
+the *real*, previously-hidden problem the mislabeled "sdram_clk" domain
+had been masking: `Max frequency for clock '$glbnet$clk_4x': 1.66 MHz`
+against a 100 MHz target. This was the first time real gate/routing
+timing had ever been checked against this design — entirely invisible to
+every simulation-based verification this project has ever run.
+
+Investigated and fixed two genuine combinational feedback loops in
+MH030's own RTL (a D-cache-hit fast path in `biu_cache_if.sv`; an
+`ex_redirect_pending`/`stall_base` loop in `eu_seq_execute.svh`/
+`eu_seq_preview.svh`) — see MH030's own
+`project_biu_dcache_hit_combinational_loop.md` and
+`project_eu_stall_redirect_combinational_loop.md` for the full
+derivations (found via a dedicated Explore-agent RTL trace cross-checked
+against Verilator's own `UNOPTFLAT` warnings). Both fixes committed and
+pushed to MH030 `main` (`1156c98`) and pulled into this repo's own
+`cores/mh030` dependency in the normal way.
+
+**Both fixes together only reached 1.78 MHz** — barely moved from the
+1.66 MHz baseline. Reading `nextpnr`'s own critical-path report directly
+(not just the summary number) found the real bottleneck is structural,
+not a loop: a single ~562 ns, ~3600-hop **acyclic** combinational chain
+spanning nearly MH030's entire CPU core (BIU state → cache interface →
+register file → address ALU → write-data steering → external bus → into
+whichever peripheral is selected, in this trace specifically ending at
+the UART's own `wb_dat_is` register), with no register boundary anywhere
+in it. This is a direct, previously-unchecked consequence of MH030's own
+S-state-FSM / zero-delay-simulation design premise — real timing closure
+at 100 MHz needs genuine pipelining inside MH030's own RTL, a much larger
+effort than either loop fix. Scoped (not yet started) as MH030's own
+`plan.md` Phase 285. **Current status: correct-behavior bring-up on real
+ULX3S hardware is achievable today at whatever real frequency the design
+timing-closes at (currently ~1.78 MHz internal / ~0.44 MHz external bus)
+— full 100 MHz real-68030 speed on this hardware remains a separate,
+open, and substantially larger undertaking.**
+
 ## Board selection history
 
 The rest of this section is the investigation that led to the ULX3S-85F
