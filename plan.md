@@ -752,6 +752,50 @@ timing-closes at (currently ~1.78 MHz internal / ~0.44 MHz external bus)
 — full 100 MHz real-68030 speed on this hardware remains a separate,
 open, and substantially larger undertaking.**
 
+### D-cache/I-cache real BRAM inference — real, measured frequency improvement (2026-09-23)
+
+MH030's own Phase 285 module-level breakdown found 80.6% of the design's
+failing (>10ns) timing endpoints concentrate in 3 modules: the EU
+sequencer (31.6%), the D-cache interface (25.6%), and the I-cache
+interface (23.3%). The D/I-cache arrays (`data_d`/`data_i`) were falling
+back to flip-flops instead of real ECP5 block RAM, confirmed via Yosys's
+own `Replacing memory` warnings. User directive: "we need to get the
+cache into bram ... Fixing this isnt optional."
+
+Root cause found (via web research plus a from-scratch minimal
+reproduction, isolating exactly where the BRAM-inference decision
+breaks): the shared read port for both caches was purely combinational,
+but every ECP5 DP16KD BRAM port requires `clock anyedge` -- real block
+RAM read ports are physically synchronous silicon, confirmed directly
+via `memory_dff`'s own diagnostic (`no output FF found`, `no address FF
+found`). Fixed in MH030's own `biu_cache_if.sv`/`biu_icache_if.sv` by
+consolidating each array's scattered write sites into one arbitrated
+write port and splitting the shared read into purpose-built registered
+reads for each real consumer (full derivation:
+`project_cache_bram_inference.md` in the MH030 repo). Both `data_d` and
+`data_i` now genuinely map to real `DP16KD` primitives, confirmed both
+in isolation and in this repo's own full `mackerel_030f` synthesis
+(`mapping memory mackerel_030f.u_cpu.u_biu.u_cache.data_d via
+$__PDPW16KD_`; DP16KD count 2→3; LUT4 -7.6%, TRELLIS_FF -14.3%).
+
+**Real-hardware measurement, via 2 full synthesis+place-and-route runs
+in this repo**: `data_d` fix alone took `$glbnet$clk_4x` from the
+1.79 MHz Phase 285 baseline to **2.39 MHz** (+33%); both `data_d` and
+`data_i` fixes together measured **2.46 MHz** (+37% combined) -- a
+real, meaningfully different outcome from an earlier same-session fix
+attempt (`wdata_hold_r`, MH030's own `project_write_data_critical_path.
+md`) which was also fully verified correct but had *zero* measured
+frequency effect. This confirms the BRAM-inference approach genuinely
+works, though Phase A alone was never expected to reach 100 MHz --
+`data_d`/`data_i` are only ~49% of the failing-endpoint population, and
+the remaining gap is dominated by MH030's own Phase C (`eu_seq`
+restructuring, 31.6% of the failing population, including a genuine
+architectural dependency, `dyn_bit_get_Dn`, needing an explicit
+cycle-count trade-off decision before that work can even start).
+**Current status: `clk_4x` now closes at ~2.46 MHz (~0.6 MHz external
+bus), up from ~1.78 MHz at the start of this session -- real, measured
+progress, still far from the 100 MHz target.**
+
 ## Board selection history
 
 The rest of this section is the investigation that led to the ULX3S-85F
